@@ -1,0 +1,143 @@
+---
+# Separate PVC for Redis
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-pvc
+  namespace: strings
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: managed-csi
+  resources:
+    requests:
+      storage: 1G
+---
+# Separate PVC for the application's state
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: app-pvc
+  namespace: strings
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: managed-csi
+  resources:
+    requests:
+      storage: 1G
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aki-detection-db
+  namespace: strings
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: aki-detection-db
+  template:
+    metadata:
+      labels:
+        app: aki-detection-db
+    spec:
+      containers:
+      - name: aki-detection-db
+        image: redis:latest
+        command: ["/bin/sh", "-c", "mkdir -p /state/redis && redis-server --dir /state/redis --appendonly yes --appendfsync always"]
+        ports:
+        - containerPort: 6379
+        resources:
+          requests:
+            memory: 0.3G
+            cpu: 0.3
+        volumeMounts:
+        - mountPath: "/state"
+          name: redis-storage
+      volumes:
+      - name: redis-storage
+        persistentVolumeClaim:
+          claimName: redis-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aki-detection-db-svc
+  namespace: strings
+spec:
+  selector:
+    app: aki-detection-db
+  ports:
+    - protocol: TCP
+      port: 6379
+      targetPort: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aki-detection
+  namespace: strings
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: aki-detection
+  template:
+    metadata:
+      labels:
+        app: aki-detection
+    spec:
+      containers:
+      - name: aki-detection
+        image: imperialswemlsspring2025.azurecr.io/coursework-strings:latest
+        imagePullPolicy: Always
+        command: ["/venv/bin/python3", "/app/main.py"]
+        args:
+        - "--history=/data/history.csv"
+        - "--wal-path=/state/wal"
+        env:
+        - name: MLLP_ADDRESS
+          value: strings-simulator.coursework6:8440
+        - name: PAGER_ADDRESS
+          value: strings-simulator.coursework6:8441
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        - name: REDIS_HOST
+          value: "aki-detection-db-svc"
+        - name: REDIS_PORT
+          value: "6379"
+        - name: REDIS_DB
+          value: "0"
+        - name: RECORD_LIMIT
+          value: "100"
+        ports:
+        - name: http
+          containerPort: 9090
+        volumeMounts:
+          - mountPath: "/data"
+            name: hospital-history
+            readOnly: true
+          - mountPath: "/state"
+            name: app-state
+        resources:
+          requests:
+            memory: 0.7G
+            cpu: 0.7
+      initContainers:
+      - name: copy-hospital-history
+        image: imperialswemlsspring2025.azurecr.io/coursework6-history
+        volumeMounts:
+          - mountPath: "/data"
+            name: hospital-history
+        resources:
+          requests:
+            memory: 0.7G
+            cpu: 0.7
+      volumes:
+      - name: hospital-history
+        emptyDir:
+          sizeLimit: 50Mi
+      - name: app-state
+        persistentVolumeClaim:
+          claimName: app-pvc
